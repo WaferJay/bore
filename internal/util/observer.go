@@ -140,7 +140,11 @@ func (o *DefaultObservable) Clear() {
 	o.observers.Range(func(key, value interface{}) bool {
 		o.observers.Delete(key)
 
-		close(value.(chan interface{}))
+		e := value.(*entry)
+		for _, each := range e.set.Array() {
+			ch := each.(chan<- interface{})
+			close(ch)
+		}
 		return true
 	})
 }
