@@ -2,6 +2,7 @@ package message
 
 import (
 	"encoding/binary"
+	"net"
 )
 
 const (
@@ -14,7 +15,8 @@ const (
 	CliSentAck
 	CliDial
 	CliWaitCall
-	CliHeartbeat
+	CliClose
+	CliTest
 )
 
 const (
@@ -23,6 +25,7 @@ const (
 	SerRetry
 	SerTimeout
 	SerConnect
+	SerClose
 )
 
 func AddProtoHeader(entry *BufEntry) error {
@@ -40,6 +43,38 @@ func CheckProtoHeader(entry *BufEntry) bool {
 		return false
 	}
 	return true
+}
+
+func ReadUDPAddr(entry *BufEntry) (*net.UDPAddr, error) {
+	ip, u16Port, err := ReadAddr(entry)
+	if err != nil {
+		return nil, err
+	}
+
+	return &net.UDPAddr{
+		IP:   ip,
+		Port: int(u16Port),
+	}, nil
+}
+
+func ReadAddr(entry *BufEntry) (net.IP, uint16, error) {
+	ipLen, err := entry.ReadByte()
+	if err != nil {
+		return nil, 0, err
+	}
+
+	ipBytes := make([]byte, ipLen)
+	if n := entry.ReadBytes(ipBytes); n != int(ipLen) {
+		return nil, 0, ErrOutBound
+	}
+
+	ip := net.IP(ipBytes)
+	u16Port, err := entry.ReadUint16(binary.BigEndian)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return ip, u16Port, err
 }
 
 func MakeFlagsByte(first byte, bs []byte) byte {

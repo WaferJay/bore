@@ -2,6 +2,7 @@ package message
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"io"
 )
@@ -347,4 +348,9 @@ func (e *BufEntry) Bytes() []byte {
 	dst := make([]byte, len(view))
 	copy(dst, view)
 	return dst
+}
+
+func (e *BufEntry) HexString() string {
+	view := e.B[e.readerIndex:e.writerIndex]
+	return hex.EncodeToString(view)
 }
