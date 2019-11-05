@@ -1,8 +1,8 @@
-package message
+package buf
 
 import (
-	"testing"
 	"log"
+	"testing"
 )
 
 func TestBufEntry_ReaderIndex(t *testing.T) {

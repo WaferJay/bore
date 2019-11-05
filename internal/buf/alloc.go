@@ -1,4 +1,4 @@
-package message
+package buf
 
 import "sync"
 
@@ -7,7 +7,7 @@ type FixedBufAllocator struct {
 	bufPool  *sync.Pool
 }
 
-type BufAllocator struct {
+type Allocator struct {
 	fixedAllocators *sync.Map
 }
 
@@ -38,24 +38,24 @@ func (fa *FixedBufAllocator) Dealloc(entry *BufEntry) {
 	fa.bufPool.Put(entry)
 }
 
-func NewBufAllocator() *BufAllocator {
-	return &BufAllocator{
+func NewBufAllocator() *Allocator {
+	return &Allocator{
 		fixedAllocators: &sync.Map{},
 	}
 }
 
-func (ba *BufAllocator) getFixedAllocator(bufSize int) *FixedBufAllocator {
+func (ba *Allocator) getFixedAllocator(bufSize int) *FixedBufAllocator {
 	value, _ := ba.fixedAllocators.LoadOrStore(
 		bufSize, NewFixedBufAllocator(bufSize))
 
 	return value.(*FixedBufAllocator)
 }
 
-func (ba *BufAllocator) Alloc(bufSize int) *BufEntry {
+func (ba *Allocator) Alloc(bufSize int) *BufEntry {
 	return ba.getFixedAllocator(bufSize).Alloc()
 }
 
-func (ba *BufAllocator) Dealloc(entry *BufEntry) {
+func (ba *Allocator) Dealloc(entry *BufEntry) {
 	if alloc, ok := ba.fixedAllocators.Load(entry.Size); !ok || alloc != entry.alloc {
 		panic("invalid buffer")
 	}

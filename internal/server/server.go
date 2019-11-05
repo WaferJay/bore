@@ -1,8 +1,9 @@
 package server
 
 import (
-	"encoding/binary"
+	buf2 "bore/internal/buf"
 	"errors"
+	"io"
 	"log"
 	"net"
 	"time"
@@ -29,7 +30,7 @@ type P2PServer struct {
 	UDPAddr   *net.UDPAddr
 	config    *P2PServerConfig
 	listener  *net.TCPListener
-	Allocator *message.BufAllocator
+	Allocator *buf2.Allocator
 	ackServer *udp.AckServer
 	operator  *util.DefaultObservable
 	status    int
@@ -62,7 +63,7 @@ func NewP2PServer(tcpAddrStr, udpAddrStr string) (*P2PServer, error) {
 		addr:      tcpAddr,
 		UDPAddr:   udpAddr,
 		config:    DefaultP2PServerConfig(),
-		Allocator: message.NewBufAllocator(),
+		Allocator: buf2.NewBufAllocator(),
 		operator:  util.NewDefaultObservable(true, true, time.Minute),
 		status:    statusCreated,
 	}
@@ -73,6 +74,7 @@ func (s *P2PServer) Start() error {
 	if s.status == statusRunning {
 		return ErrAlreadyStarted
 	}
+	s.status = statusRunning
 
 	l, err := net.ListenTCP("tcp", s.addr)
 
@@ -134,23 +136,19 @@ func (s *P2PServer) handleConnection(conn net.Conn) {
 
 	remoteAddr := conn.RemoteAddr()
 	session := NewSession(s, conn)
-	defer func() {
-		addr := session.Conn().RemoteAddr()
-		if err := session.Close(); err != nil {
-			log.Printf("Close [%s] error: %s", addr, err)
-		}
-		log.Printf("Closed session [%s]", addr)
-	}()
 
 	log.Printf("Start session [%s]", remoteAddr)
 
-	for {
+	for !session.Closed {
 		buf.Clear()
 
 		util.SetReadTimeout(conn, config.ReadTimeout)
 
-		if _, err := util.ReadAtLeast(conn, buf, 3); err != nil {
-			util.Debug.Logf("Recv from %s failed: %s", remoteAddr, err)
+		if _, err := buf2.ReadAtLeast(conn, buf, 3); err != nil {
+			if err != io.EOF {
+				util.Debug.Logf("Recv from %s failed: %s", remoteAddr, err)
+				session.Reject()
+			}
 			return
 		}
 
@@ -158,59 +156,47 @@ func (s *P2PServer) handleConnection(conn net.Conn) {
 			if util.Debug {
 				util.Debug.Logf("Incorrect protocol: 0x%X", buf.B[:2])
 			}
+			session.Reject()
 			return
 		}
 
-		var exc error
-
 		switch cmd, _ := buf.ReadByte(); cmd {
-		case message.CliHeartbeat:
-			session.SendOk()
+		case message.CliTest:
+			util.Debug.Logf("[%s] CMD: TEST", remoteAddr)
+			if session.SendOk() != nil {
+				session.Close()
+			}
 
 		case message.CliJoin:
 			log.Printf("[%s] CMD: JOIN", remoteAddr)
-			exc = session.Join()
+			session.Join()
 
 		case message.CliSentAck:
 			log.Printf("[%s] CMD: SENT_ACK", remoteAddr)
-			exc = session.SentAck()
+			session.SentAck()
 
 		case message.CliDial:
 			log.Printf("[%s] CMD: DIAL", remoteAddr)
-			var IPlen byte
-			if IPlen, exc = buf.ReadByte(); exc != nil {
+			ip, port, err := message.ReadAddr(buf)
+			if err != nil {
 				session.Reject()
 				return
 			}
-
-			IPBytes := make([]byte, IPlen)
-			buf.ReadBytes(IPBytes)
-			ip := net.IP(IPBytes)
-			port, err := buf.ReadUint16(binary.BigEndian)
-			if err != nil {
-				exc = ErrReject
-			}
-
-			exc = session.Dial(ip, port)
+			session.Dial(ip, port)
 
 		case message.CliWaitCall:
 			log.Printf("[%s] CMD: WAIT_CALL", remoteAddr)
-			exc = session.WaitCall()
+			session.WaitCall()
+
+		case message.CliClose:
+			log.Printf("[%s] CLOSE", remoteAddr)
+			session.Close()
 
 		default:
-			log.Printf("Unknown cmd: 0x%X", cmd)
-			exc = ErrReject
-		}
-
-		if exc == ErrReject {
+			log.Printf("[%s] Unknown cmd: 0x%X", remoteAddr, cmd)
 			session.Reject()
-			log.Printf("[%s] Rejected", remoteAddr)
-			return
-		} else if exc == ErrSessionEnd {
-			util.Debug.Logf("[%s] End of session", remoteAddr)
-			return
-		} else {
-			util.Debug.Log("Error:", exc)
 		}
 	}
+
+	log.Printf("Closed session [%s]", remoteAddr)
 }

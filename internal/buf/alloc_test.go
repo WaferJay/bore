@@ -1,9 +1,9 @@
-package message
+package buf
 
 import (
-	"testing"
-	"log"
 	"encoding/binary"
+	"log"
+	"testing"
 )
 
 func TestNewFixedBufAllocator(t *testing.T) {

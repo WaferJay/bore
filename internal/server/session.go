@@ -1,27 +1,22 @@
 package server
 
 import (
+	buf2 "bore/internal/buf"
 	"bore/internal/config"
 	"bore/internal/message"
 	"bore/internal/util"
 	"encoding/binary"
-	"errors"
 	"log"
 	"math/rand"
 	"net"
 	"time"
 )
 
-var (
-	ErrSessionEnd = errors.New("end")
-	ErrReject     = errors.New("reject")
-)
-
 type SessionState interface {
-	Join(s *Session) error
-	SentAck(s *Session) error
-	Dial(s *Session, ip net.IP, port uint16) error
-	WaitCall(s *Session) error
+	Join(s *Session)
+	SentAck(s *Session)
+	Dial(s *Session, ip net.IP, port uint16)
+	WaitCall(s *Session)
 }
 
 type Session struct {
@@ -32,6 +27,7 @@ type Session struct {
 	udpAddrChan chan interface{}
 	UDPAddr     *net.UDPAddr
 	retryCount  int
+	Closed      bool
 }
 
 func NewSession(server *P2PServer, conn net.Conn) *Session {
@@ -42,46 +38,93 @@ func (s *Session) Conn() net.Conn           { return s.conn }
 func (s *Session) Server() *P2PServer       { return s.server }
 func (s *Session) setState(ss SessionState) { s.state = ss }
 
-func (s *Session) Join() error                       { return s.state.Join(s) }
-func (s *Session) SentAck() error                    { return s.state.SentAck(s) }
-func (s *Session) Dial(ip net.IP, port uint16) error { return s.state.Dial(s, ip, port) }
-func (s *Session) WaitCall() error                   { return s.state.WaitCall(s) }
+func (s *Session) Join()                       { s.state.Join(s) }
+func (s *Session) SentAck()                    { s.state.SentAck(s) }
+func (s *Session) Dial(ip net.IP, port uint16) { s.state.Dial(s, ip, port) }
+func (s *Session) WaitCall()                   { s.state.WaitCall(s) }
 
-func (s *Session) Send(buf *message.BufEntry) error {
-	_, err := util.WriteBuf(s.Conn(), buf)
+func (s *Session) Send(buf *buf2.BufEntry) error {
+	_, err := buf2.WriteBuf(s.Conn(), buf)
+	if err != nil {
+		addr := s.conn.RemoteAddr()
+		log.Printf("[%s] Send response failed: %s", addr, err)
+		util.Debug.Logf("[%s] Message: %s", addr, buf.HexString())
+	}
 	return err
 }
 
-func (s *Session) Reject(flags ...byte) error {
+func (s *Session) close() {
+	if s.Closed {
+		return
+	}
+
+	s.Closed = true
+	if err := s.conn.Close(); err != nil {
+		util.Debug.Logf("[%s] Close connection error: %s", s.conn.RemoteAddr(), err)
+	}
+	s.conn = nil
+
+	ch := s.udpAddrChan
+	ackId := s.ackId
+	if ackId != 0 && ch != nil {
+		s.Server().Ack().Unregister(ackId, ch)
+		select {
+		case ch <- nil:
+		default:
+		}
+	}
+	s.ackId = 0
+	s.udpAddrChan = nil
+	s.UDPAddr = nil
+	return
+}
+
+func (s *Session) sendReject(flags ...byte) {
 	alloc := s.Server().Allocator
 	buf := alloc.Alloc(4)
 	defer alloc.Dealloc(buf)
 
 	flag := message.MakeFlagsByte(message.SerReject, flags)
-	message.AddProtoHeader(buf)
-	buf.PutByte(flag)
 
-	return s.Send(buf)
+	message.AddFlowProtoHeader(buf.Flow()).
+		Byte(flag).
+		FatalIfError()
+
+	if err := s.Send(buf); err != nil {
+		addr := s.conn.RemoteAddr()
+		util.Debug.Logf("[%s] Send REJECT failed: %s", addr, err)
+	}
 }
 
-func (s *Session) Close() (err error) {
-	if s.conn != nil {
-		s.conn.Write([]byte(""))
-		err = s.conn.Close()
-		s.conn = nil
+func (s *Session) sendClose(flags ...byte) {
+	alloc := s.Server().Allocator
+	buf := alloc.Alloc(4)
+	defer alloc.Dealloc(buf)
 
-		ch := s.udpAddrChan
-		ackId := s.ackId
-		if ackId != 0 && ch != nil{
-			s.Server().Ack().Unregister(ackId, ch)
-			select {
-			case ch <- nil:
-			default:
-			}
-		}
-		s.ackId = 0
-		s.udpAddrChan = nil
-		s.UDPAddr = nil
+	flag := message.MakeFlagsByte(message.SerClose, flags)
+
+	message.AddFlowProtoHeader(buf.Flow()).
+		Byte(flag).
+		FatalIfError()
+
+	if err := s.Send(buf); err != nil {
+		util.Debug.Logf("[%s] Send CLOSE failed: %s", s.conn.RemoteAddr(), err)
+	}
+}
+
+func (s *Session) Reject() {
+	if !s.Closed {
+		util.Debug.Logf("[%s] Rejecting", s.conn.RemoteAddr())
+		s.sendReject()
+		s.close()
+	}
+}
+
+func (s *Session) Close() {
+	if !s.Closed {
+		util.Debug.Logf("[%s] Closing", s.conn.RemoteAddr())
+		s.sendClose()
+		s.close()
 	}
 	return
 }
@@ -91,15 +134,11 @@ func (s *Session) SendAckId(port int, ackId uint32) error {
 	buf := alloc.Alloc(16)
 	defer alloc.Dealloc(buf)
 
-	flow := message.AddFlowProtoHeader(buf.Flow()).
+	message.AddFlowProtoHeader(buf.Flow()).
 		Byte(message.SerOK).
 		Uint16(uint16(port), binary.BigEndian).
-		Uint32(ackId, binary.LittleEndian)
-
-	if err := flow.Error(); err != nil {
-		flow.LogError()
-		return err
-	}
+		Uint32(ackId, binary.LittleEndian).
+		FatalIfError()
 
 	return s.Send(buf)
 }
@@ -109,11 +148,12 @@ func (s *Session) SendAddr(ip net.IP, port int) error {
 	buf := alloc.Alloc(32)
 	defer alloc.Dealloc(buf)
 
-	message.AddProtoHeader(buf)
-	buf.PutByte(message.SerOK)
-	buf.PutByte(byte(len(ip)))
-	buf.PutBytes(ip)
-	buf.PutUint16(uint16(port), binary.BigEndian)
+	message.AddFlowProtoHeader(buf.Flow()).
+		Byte(message.SerOK).
+		Byte(byte(len(ip))).
+		Bytes(ip).
+		Uint16(uint16(port), binary.BigEndian).
+		FatalIfError()
 
 	return s.Send(buf)
 }
@@ -123,11 +163,12 @@ func (s *Session) SendCallerAddr(addr *net.UDPAddr) error {
 	buf := alloc.Alloc(32)
 	defer alloc.Dealloc(buf)
 
-	message.AddProtoHeader(buf)
-	buf.PutByte(message.SerConnect)
-	buf.PutByte(byte(len(addr.IP)))
-	buf.PutBytes(addr.IP)
-	buf.PutUint16(uint16(addr.Port), binary.BigEndian)
+	message.AddFlowProtoHeader(buf.Flow()).
+		Byte(message.SerConnect).
+		Byte(byte(len(addr.IP))).
+		Bytes(addr.IP).
+		Uint16(uint16(addr.Port), binary.BigEndian).
+		FatalIfError()
 
 	return s.Send(buf)
 }
@@ -142,8 +183,9 @@ func (s *Session) SendRetry(timeout bool) error {
 		flag |= message.SerTimeout
 	}
 
-	message.AddProtoHeader(buf)
-	buf.PutByte(byte(flag))
+	message.AddFlowProtoHeader(buf.Flow()).
+		Byte(byte(flag)).
+		FatalIfError()
 
 	return s.Send(buf)
 }
@@ -153,15 +195,16 @@ func (s *Session) SendOk() error {
 	buf := alloc.Alloc(16)
 	defer alloc.Dealloc(buf)
 
-	message.AddProtoHeader(buf)
-	buf.PutByte(message.SerOK)
+	message.AddFlowProtoHeader(buf.Flow()).
+		Byte(message.SerOK).
+		FatalIfError()
 
 	return s.Send(buf)
 }
 
 type (
-	initSessionState byte
-	ackSessionState byte
+	initSessionState   byte
+	ackSessionState    byte
 	obtainSessionState byte
 )
 
@@ -171,13 +214,13 @@ var (
 	stateObtain obtainSessionState
 )
 
-func (*initSessionState) Join(session *Session) error {
+func (*initSessionState) Join(session *Session) {
 	port := session.Server().UDPAddr.Port
 
 	ackId := rand.Uint32() | 0x1
-	err := session.SendAckId(port, ackId)
-	if err != nil {
-		return ErrSessionEnd
+	if err := session.SendAckId(port, ackId); err != nil {
+		session.Close()
+		return
 	}
 
 	udpAddrChan := make(chan interface{})
@@ -186,41 +229,48 @@ func (*initSessionState) Join(session *Session) error {
 	session.udpAddrChan = udpAddrChan
 
 	session.setState(&stateAck)
-	return nil
 }
 
-func (*ackSessionState) SentAck(s *Session) error {
+func (*ackSessionState) SentAck(s *Session) {
 	udpAddrChan := s.udpAddrChan
 	select {
 	case raw := <-udpAddrChan:
 		udpAddr := raw.(*net.UDPAddr)
 		if s.UDPAddr = udpAddr; udpAddr == nil {
-			return ErrReject
+			s.Reject()
+			return
 		}
-		if s.SendAddr(udpAddr.IP, udpAddr.Port) != nil {
-			return ErrSessionEnd
+
+		log.Printf("[%s] Determined UDP Address: %s", s.conn.RemoteAddr(), udpAddr)
+		if err := s.SendAddr(udpAddr.IP, udpAddr.Port); err != nil {
+			s.Close()
+			return
 		}
 		s.setState(&stateObtain)
 
 	case <-time.NewTimer(config.ChannelTimeout).C:
 		s.Server().Ack().Unregister(s.ackId, udpAddrChan)
 		if s.retryCount++; s.retryCount >= config.MaxRetryCount {
-			return ErrReject
+			log.Printf("[%s] Timeout", s.conn.RemoteAddr())
+			s.Reject()
+			return
 		}
 
-		if s.SendRetry(true) != nil {
-			return ErrSessionEnd
+		if err := s.SendRetry(true); err != nil {
+			s.Close()
+			return
 		}
 		s.setState(&stateInit)
 	}
 	s.udpAddrChan = nil
 	s.ackId = 0
-	return nil
+	return
 }
 
-func (*obtainSessionState) WaitCall(s *Session) error {
+func (*obtainSessionState) WaitCall(s *Session) {
 	if s.UDPAddr == nil {
-		return ErrReject
+		s.Reject()
+		return
 	}
 
 	heartbeat := s.Server().Heartbeat()
@@ -236,16 +286,21 @@ func (*obtainSessionState) WaitCall(s *Session) error {
 
 	remoteAddr := s.Conn().RemoteAddr()
 	var beatCount int
-	for {
+	for !s.Closed {
 		select {
 		case raw := <-callerChannel:
 			if raw == nil {
-				return ErrSessionEnd
+				s.Reject()
+				return
 			}
 
 			callerAddr := raw.(*net.UDPAddr)
 			log.Printf("[%s] Incoming call: %s", remoteAddr, callerAddr)
-			return s.SendCallerAddr(callerAddr)
+			if s.SendCallerAddr(callerAddr) != nil {
+				s.Reject()
+			}
+			// TODO: change state
+			return
 
 		// reset timer
 		case <-keepAliveChan:
@@ -253,38 +308,38 @@ func (*obtainSessionState) WaitCall(s *Session) error {
 			if beatCount >= config.MaxHeartbeatCount {
 				log.Printf("[%s] Waiting for call timeout", remoteAddr)
 				s.Server().Operator().Unregister(addrId, callerChannel)
-				return ErrReject
+				s.Reject()
 			}
 
 		case <-time.NewTimer(config.ChannelTimeout).C:
 			log.Printf("[%s] Heartbest timeout", remoteAddr)
 			s.Server().Operator().Unregister(addrId, callerChannel)
-			return ErrReject
+			s.Reject()
 		}
 	}
 }
 
-func (*obtainSessionState) Dial(s *Session, ip net.IP, port uint16) error {
+func (*obtainSessionState) Dial(s *Session, ip net.IP, port uint16) {
 	addrId := util.HashAddr(ip, port)
 	if ok := s.Server().Operator().Notify(addrId, s.UDPAddr); ok {
 		if err := s.SendOk(); err != nil {
-			util.Debug.Log("SendOk fail:", err)
+			util.Debug.Logf("[%s] SendOk fail: %s", s.conn.RemoteAddr(), err)
+			s.Reject()
 		}
-		return ErrSessionEnd
+		// TODO: ensure dial success
+	} else {
+		s.Reject()
 	}
-	return ErrReject
 }
 
-func (*obtainSessionState) SentAck(s *Session) error {
-	return stateAck.SentAck(s)
-}
+func (*obtainSessionState) SentAck(s *Session) { s.Reject() }
 
-func (*initSessionState) SentAck(*Session) error              { return ErrReject }
-func (*initSessionState) Dial(*Session, net.IP, uint16) error { return ErrReject }
-func (*initSessionState) WaitCall(*Session) error             { return ErrReject }
+func (*initSessionState) SentAck(s *Session)                  { s.Reject() }
+func (*initSessionState) Dial(s *Session, _ net.IP, _ uint16) { s.Reject() }
+func (*initSessionState) WaitCall(s *Session)                 { s.Reject() }
 
-func (*ackSessionState) Join(*Session) error                 { return ErrReject }
-func (*ackSessionState) Dial(*Session, net.IP, uint16) error { return ErrReject }
-func (*ackSessionState) WaitCall(*Session) error             { return ErrReject }
+func (*ackSessionState) Join(s *Session)                     { s.Reject() }
+func (*ackSessionState) Dial(s *Session, _ net.IP, _ uint16) { s.Reject() }
+func (*ackSessionState) WaitCall(s *Session)                 { s.Reject() }
 
-func (*obtainSessionState) Join(*Session) error { return ErrReject }
+func (*obtainSessionState) Join(s *Session) { s.Reject() }

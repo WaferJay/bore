@@ -1,11 +1,10 @@
-package util
+package buf
 
 import (
 	"io"
-	"../message"
 )
 
-func ReadAtLeast(reader io.Reader, buf *message.BufEntry, least int) (int, error) {
+func ReadAtLeast(reader io.Reader, buf *BufEntry, least int) (int, error) {
 	bs := buf.B[buf.WriterIndex():]
 	n, err := io.ReadAtLeast(reader, bs, least)
 	if err != nil {
@@ -19,7 +18,7 @@ func ReadAtLeast(reader io.Reader, buf *message.BufEntry, least int) (int, error
 	return n, err
 }
 
-func ReadFull(reader io.Reader, buf *message.BufEntry) (int, error) {
+func ReadFull(reader io.Reader, buf *BufEntry) (int, error) {
 	bs := buf.B[buf.WriterIndex():]
 	n, err := io.ReadFull(reader, bs)
 
@@ -33,7 +32,7 @@ func ReadFull(reader io.Reader, buf *message.BufEntry) (int, error) {
 	return n, err
 }
 
-func WriteBuf(writer io.Writer, buf *message.BufEntry) (int, error) {
+func WriteBuf(writer io.Writer, buf *BufEntry) (int, error) {
 	bs := buf.B[buf.ReaderIndex():buf.WriterIndex()]
 	n, err := writer.Write(bs)
 
@@ -43,7 +42,9 @@ func WriteBuf(writer io.Writer, buf *message.BufEntry) (int, error) {
 			panic("unreachable")
 		}
 	}
-	buf.SetReaderIndex(buf.WriterIndex())
+	if buf.SetReaderIndex(buf.WriterIndex()) != nil {
+		panic("unreachable")
+	}
 
 	return n, err
 }

@@ -1,6 +1,7 @@
 package message
 
 import (
+	"bore/internal/buf"
 	"encoding/binary"
 	"net"
 )
@@ -28,15 +29,15 @@ const (
 	SerClose
 )
 
-func AddProtoHeader(entry *BufEntry) error {
+func AddProtoHeader(entry *buf.BufEntry) error {
 	return entry.PutUint16(ProtoHeader, binary.BigEndian)
 }
 
-func AddFlowProtoHeader(flow *BufWriteFlow) *BufWriteFlow {
+func AddFlowProtoHeader(flow *buf.BufWriteFlow) *buf.BufWriteFlow {
 	return flow.Uint16(ProtoHeader, binary.BigEndian)
 }
 
-func CheckProtoHeader(entry *BufEntry) bool {
+func CheckProtoHeader(entry *buf.BufEntry) bool {
 	if v, err := entry.ReadUint16(binary.BigEndian);
 		err != nil || v != ProtoHeader {
 
@@ -45,7 +46,7 @@ func CheckProtoHeader(entry *BufEntry) bool {
 	return true
 }
 
-func ReadUDPAddr(entry *BufEntry) (*net.UDPAddr, error) {
+func ReadUDPAddr(entry *buf.BufEntry) (*net.UDPAddr, error) {
 	ip, u16Port, err := ReadAddr(entry)
 	if err != nil {
 		return nil, err
@@ -57,7 +58,7 @@ func ReadUDPAddr(entry *BufEntry) (*net.UDPAddr, error) {
 	}, nil
 }
 
-func ReadAddr(entry *BufEntry) (net.IP, uint16, error) {
+func ReadAddr(entry *buf.BufEntry) (net.IP, uint16, error) {
 	ipLen, err := entry.ReadByte()
 	if err != nil {
 		return nil, 0, err
@@ -65,7 +66,7 @@ func ReadAddr(entry *BufEntry) (net.IP, uint16, error) {
 
 	ipBytes := make([]byte, ipLen)
 	if n := entry.ReadBytes(ipBytes); n != int(ipLen) {
-		return nil, 0, ErrOutBound
+		return nil, 0, buf.ErrOutBound
 	}
 
 	ip := net.IP(ipBytes)

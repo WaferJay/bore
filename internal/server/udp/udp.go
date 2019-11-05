@@ -1,6 +1,7 @@
 package udp
 
 import (
+	"bore/internal/buf"
 	"bore/internal/config"
 	"encoding/binary"
 	"log"
@@ -13,12 +14,12 @@ import (
 type AckServer struct {
 	addr      *net.UDPAddr
 	conn      *net.UDPConn
-	allocator *message.BufAllocator
+	allocator *buf.Allocator
 	Heartbeat util.Observable
 	Ack       util.Observable
 }
 
-func NewAckServer(addr *net.UDPAddr, alloc *message.BufAllocator) *AckServer {
+func NewAckServer(addr *net.UDPAddr, alloc *buf.Allocator) *AckServer {
 	return &AckServer{
 		addr:      addr,
 		allocator: alloc,
@@ -41,11 +42,11 @@ func (us *AckServer) Loop() {
 		buf.Clear()
 
 		n, addr, err := us.conn.ReadFromUDP(buf.B)
-		buf.SetWriterIndex(n)
+		_ = buf.SetWriterIndex(n)
 
 		if err != nil {
 			log.Println("UDP Read error:", err)
-			continue
+			break
 		}
 
 		if n <= 6 || !message.CheckProtoHeader(buf) {
