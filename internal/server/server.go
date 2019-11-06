@@ -117,7 +117,7 @@ func (s *P2PServer) Loop() {
 
 		conn, err := s.listener.Accept()
 		if err != nil {
-			log.Println("Accept() error:", err)
+			util.Debug.Log("Accept() error:", err)
 			continue
 		}
 
